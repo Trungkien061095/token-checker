@@ -56,7 +56,11 @@
       <option value="1">24 giờ qua</option>
       <option value="7">7 ngày qua</option>
       <option value="30">30 ngày qua</option>
+      <option value="90">3 tháng qua</option>
+      <option value="180">6 tháng qua</option>
+      <option value="365">12 tháng qua</option>
     </select>
+    <select id="fYear"><option value="">Mọi năm</option></select>
     <select id="fSort">
       <option value="new">Mới nhất trước</option>
       <option value="old">Cũ nhất trước</option>
@@ -128,6 +132,8 @@ function render(d) {
   const opts = (arr, all) => `<option value="">${all}</option>` + arr.map(s => `<option>${esc(s)}</option>`).join('');
   $('fGroup').innerHTML = opts([...new Set(items.map(i => i.group))], 'Mọi loại nguồn');
   $('fSource').innerHTML = opts([...new Set(items.map(i => i.source))], 'Tất cả nguồn');
+  const years = [...new Set(items.filter(i => i.time).map(i => new Date(i.time).getFullYear()))].sort((a, b) => b - a);
+  $('fYear').innerHTML = opts(years, 'Mọi năm');
   $('filters').style.display = 'flex';
   draw();
 }
@@ -167,12 +173,14 @@ function draw() {
   const grp = $('fGroup').value;
   const src = $('fSource').value;
   const days = +$('fTime').value;
+  const yr = +$('fYear').value;
   const sort = $('fSort').value;
   const now = Date.now();
   let list = items.filter(i =>
     (!grp || i.group === grp) &&
     (!src || i.source === src) &&
-    (!days || (i.time && now - new Date(i.time) <= days * 864e5)));
+    (!days || (i.time && now - new Date(i.time) <= days * 864e5)) &&
+    (!yr || (i.time && new Date(i.time).getFullYear() === yr)));
   list.sort((a, b) => (new Date(b.time || 0) - new Date(a.time || 0)) * (sort === 'new' ? 1 : -1));
   $('count').textContent = list.length + ' mục';
   if (!list.length) { $('result').innerHTML = '<div class="msg">Không có thông tin phù hợp.</div>'; return; }
@@ -188,7 +196,7 @@ function draw() {
       </td></tr>`).join('')}</tbody></table>`;
 }
 
-['fGroup', 'fSource', 'fTime', 'fSort'].forEach(id => $(id).addEventListener('change', draw));
+['fGroup', 'fSource', 'fTime', 'fYear', 'fSort'].forEach(id => $(id).addEventListener('change', draw));
 </script>
 </body>
 </html>

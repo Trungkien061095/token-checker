@@ -152,9 +152,9 @@ async function lookupCoin(q) {
 }
 
 // ---------- Báo chí uy tín (Google News RSS, lọc theo danh sách tờ báo) ----------
-async function fromPress(coin) {
+async function pressQuery(coin, range) {
   const sites = Object.keys(PRESS).map(s => 'site:' + s).join(' OR ');
-  const q = `"${coin.name}" crypto (${sites}) when:90d`;
+  const q = `"${coin.name}" crypto (${sites}) ${range}`;
   const xml = await getText(`https://news.google.com/rss/search?q=${encodeURIComponent(q)}&hl=en-US&gl=US&ceid=US:en`);
   const symRe = new RegExp(`\\b${escRe(coin.symbol)}\\b`, 'i');
   const out = [];
@@ -169,9 +169,19 @@ async function fromPress(coin) {
     if (srcName && title.endsWith(' - ' + srcName)) title = title.slice(0, -(srcName.length + 3));
     if (!title.toLowerCase().includes(coin.name.toLowerCase()) && !symRe.test(title)) continue; // lọc tin lạc đề
     out.push(item(PRESS[site], G.PRESS, iso(tag(blk, 'pubDate')), title, tag(blk, 'link')));
-    if (out.length >= 20) break;
+    if (out.length >= 15) break;
   }
   return out;
+}
+
+// Lấy tin gần đây + tin của từng năm (năm nay, năm ngoái, 2 năm trước) để lọc theo năm được
+async function fromPress(coin) {
+  const y = new Date().getFullYear();
+  const ranges = ['when:30d', ...[y, y - 1, y - 2].map(v => `after:${v}-01-01 before:${v + 1}-01-01`)];
+  const res = await Promise.allSettled(ranges.map(r => pressQuery(coin, r)));
+  const ok = res.filter(r => r.status === 'fulfilled');
+  if (!ok.length) throw res[0].reason;
+  return ok.flatMap(r => r.value);
 }
 
 // ---------- X (x.com): embed timeline chính thức, dự phòng Nitter ----------
@@ -396,7 +406,7 @@ exports.handler = async event => {
       return true;
     })
     .sort((a, b) => new Date(b.time || 0) - new Date(a.time || 0))
-    .slice(0, 90)
+    .slice(0, 150)
     .map(i => ({
       source: i.source,
       group: i.group,
