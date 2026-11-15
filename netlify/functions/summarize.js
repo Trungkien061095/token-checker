@@ -110,6 +110,20 @@ async function resolveGoogle(url) {
   return real;
 }
 
+// Cắt đoạn dài thành các khúc <= max ký tự, theo ranh giới câu (để dịch được từng khúc)
+function chunkText(t, max) {
+  if (t.length <= max) return [t];
+  const sents = t.match(/[^.!?。]+[.!?。]+(?=\s|$)|[^.!?。]+$/g) || [t];
+  const out = [];
+  let cur = '';
+  for (const s of sents) {
+    if (cur && (cur + ' ' + s).length > max) { out.push(cur.trim()); cur = s; }
+    else cur += (cur ? ' ' : '') + s;
+  }
+  if (cur) out.push(cur.trim());
+  return out.map(x => x.slice(0, max));
+}
+
 // ---------- lấy mô tả + đoạn đầu của bài ----------
 function extract(html) {
   html = html.slice(0, 450000);
@@ -125,7 +139,18 @@ function extract(html) {
   const ps = [...body.matchAll(/<p[^>]*>([\s\S]*?)<\/p>/gi)]
     .map(m => clean(m[1]))
     .filter(t => t.length >= 60 && !/cookie|subscribe|newsletter|sign up|all rights reserved|advertisement/i.test(t));
-  return { desc, text: ps.join(' ').slice(0, 6000) };
+  const paras = [];
+  const seenP = new Set();
+  let total = 0;
+  for (const p of ps) {
+    for (const q of chunkText(p, 900)) {
+      if (seenP.has(q) || total > 9000) continue;
+      seenP.add(q);
+      paras.push(q);
+      total += q.length;
+    }
+  }
+  return { desc, text: ps.join(' ').slice(0, 6000), paras };
 }
 
 // ---------- tùy chọn: Claude tóm tắt ra tiếng Việt ----------
@@ -161,12 +186,13 @@ async function one(it, name) {
   if (!safeUrl(url)) return { ok: false };
   const title = String(it.title || '');
   const html = await http(url, { timeout: 3500, headers: { Accept: 'text/html,application/xhtml+xml' } });
-  const { desc, text } = extract(html);
+  const { desc, text, paras: p0 } = extract(html);
+  const paras = p0.length ? p0 : desc ? [desc] : [];
 
   if (process.env.ANTHROPIC_API_KEY && text.length > 200) {
     try {
       const s = await llm(title, text, name);
-      if (s) return { ok: true, summary: s, isVi: true, finalUrl: url };
+      if (s) return { ok: true, summary: s, isVi: true, finalUrl: url, paragraphs: paras };
     } catch {}
   }
 
@@ -181,8 +207,9 @@ async function one(it, name) {
     summary = summarize(text, name, title, 360, 3);
   }
   summary = cut(summary, 420);
-  if (!summary || sameish(summary, title)) return { ok: false, finalUrl: url };
-  return { ok: true, summary, isVi: false, finalUrl: url };
+  if (!summary || sameish(summary, title)) summary = '';
+  if (!summary && !paras.length) return { ok: false, finalUrl: url };
+  return { ok: true, summary, isVi: false, finalUrl: url, paragraphs: paras };
 }
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));

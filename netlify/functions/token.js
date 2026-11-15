@@ -332,7 +332,7 @@ async function fromSiteFeed(url) {
     feedUrl = new URL(href[1], url).href;
   }
   const xml = await getText(feedUrl, { timeout: 4500 });
-  return parseFeed(xml, 8).map(i => ({ source: 'Blog chính thức', sub: host, group: G.OFFICIAL, time: i.time, title: i.title, body: i.body, url: i.url }));
+  return parseFeed(xml, 8).map(i => ({ source: 'Blog', sub: host, group: G.OFFICIAL, time: i.time, title: i.title, body: i.body, url: i.url }));
 }
 
 // ---------- CoinPaprika: sự kiện của dự án ----------
@@ -382,8 +382,9 @@ function finalize(i, coin) {
     body = body.slice(head.length).replace(/^[\s—–:\-.]+/, '');
   }
   const summary = body.length >= 80 ? summarize(body, coin.name, title, 330, 2) : '';
+  const full = body.length >= 80 ? body.slice(0, 3000) : '';
   const canFetch = !summary && !!i.url && (i.group === G.PRESS || /^(Blog|Reddit)/.test(i.source));
-  return { source: i.source, sub: i.sub || '', group: i.group, time: i.time, url: i.url, title, summary, isVi: !!i.isVi, canFetch };
+  return { source: i.source, sub: i.sub || '', group: i.group, time: i.time, url: i.url, title, summary, full, isVi: !!i.isVi, canFetch };
 }
 
 // ---------- handler ----------
