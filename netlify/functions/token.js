@@ -1,10 +1,9 @@
 // Netlify Function: gom thông tin token từ các nguồn công khai, chính thống.
-// Chỉ dùng API / RSS công khai, không cào HTML trái phép.
-// Gọi: /.netlify/functions/token?q=wld
+// Chỉ dùng API / RSS công khai. Gọi: /.netlify/functions/token?q=wld
 //
 // Biến môi trường tùy chọn (Netlify > Site configuration > Environment variables):
 //   GITHUB_TOKEN   - tăng hạn mức GitHub API (mặc định 60 lượt/giờ/IP)
-//   COINGECKO_KEY  - Demo API key miễn phí của CoinGecko (đỡ bị giới hạn lượt gọi)
+//   COINGECKO_KEY  - Demo API key miễn phí của CoinGecko
 
 const UA = 'Mozilla/5.0 (compatible; TokenChecker/1.0)';
 
@@ -31,7 +30,7 @@ const PRESS = {
 
 const NITTER = ['https://nitter.net', 'https://nitter.poast.org', 'https://nitter.privacydev.net'];
 
-// ---------- tiện ích ----------
+// ---------- tiện ích mạng ----------
 async function http(url, { timeout = 5500, headers = {}, as = 'text' } = {}) {
   const ctl = new AbortController();
   const timer = setTimeout(() => ctl.abort(), timeout);
@@ -46,14 +45,33 @@ async function http(url, { timeout = 5500, headers = {}, as = 'text' } = {}) {
 const getJson = (u, o) => http(u, { ...o, as: 'json' });
 const getText = (u, o) => http(u, { ...o, as: 'text' });
 
-const clean = s =>
-  (s || '')
-    .replace(/<!\[CDATA\[|\]\]>/g, '')
-    .replace(/<[^>]+>/g, ' ')
-    .replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>')
-    .replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&nbsp;/g, ' ')
-    .replace(/&#(\d+);/g, (_, n) => String.fromCharCode(+n))
+// ---------- làm sạch văn bản ----------
+const safeCp = n => { try { return String.fromCodePoint(n); } catch { return ''; } };
+const decode = s =>
+  String(s ?? '')
+    .replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"')
+    .replace(/&#39;|&#x27;|&apos;/g, "'").replace(/&nbsp;/g, ' ')
+    .replace(/&#x([0-9a-f]+);/gi, (_, h) => safeCp(parseInt(h, 16)))
+    .replace(/&#(\d+);/g, (_, n) => safeCp(+n))
+    .replace(/&amp;/g, '&');
+
+// Giải mã trước rồi mới bỏ thẻ, vì RSS (nhất là Reddit) hay gửi HTML dạng &lt;table&gt;...
+const clean = s => {
+  let t = decode(String(s ?? '').replace(/<!\[CDATA\[|\]\]>/g, ''));
+  t = t.replace(/<(script|style)[\s\S]*?<\/\1>/gi, ' ').replace(/<br\s*\/?>/gi, ' ').replace(/<[^>]*>/g, ' ');
+  t = decode(t).replace(/<[^>]*$/, ' ');
+  return t.replace(/\s+/g, ' ').trim();
+};
+// Văn bản để hiển thị: bỏ link trần và rác của Reddit
+const prose = s =>
+  clean(s)
+    .replace(/submitted by\s+\/?u\/\S+/gi, ' ')
+    .replace(/\[(?:link|comments|more)\]/gi, ' ')
+    .replace(/https?:\/\/\S+/g, ' ')
     .replace(/\s+/g, ' ').trim();
+const mdText = s =>
+  prose(String(s ?? '').replace(/!?\[([^\]]*)\]\([^)]*\)/g, '$1'))
+    .replace(/^[#>*\-\s]+/, '').replace(/[*_~`#>]+/g, ' ').replace(/\s+/g, ' ').trim();
 
 const tag = (x, t) => {
   const m = x.match(new RegExp(`<${t}(?:\\s[^>]*)?>([\\s\\S]*?)</${t}>`));
@@ -65,6 +83,7 @@ const iso = v => {
   return isNaN(d) ? null : d.toISOString();
 };
 const escRe = s => String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+const cut = (t, n) => (t.length <= n ? t : t.slice(0, n).replace(/\s+\S*$/, '') + '…');
 const usd = n => {
   n = Number(n);
   if (!isFinite(n)) return '—';
@@ -72,10 +91,44 @@ const usd = n => {
 };
 const pct = n => (n == null || !isFinite(n) ? '—' : Number(n).toFixed(2) + '%');
 
-// item: text = nội dung gốc (sẽ được dịch nếu cần); vi = nội dung tiếng Việt có sẵn (khỏi dịch)
-const item = (source, group, time, text, url, vi) => ({ source, group, time, text, url, vi });
+// ---------- tóm tắt trích xuất (không cần AI) ----------
+const STOP = new Set('the and for with that this from have has had was were are been will would can could not but they their you your our its his her them than then into over after before more most also just about what when which who how why all any each other such only own same too very'.split(' '));
+const words = s => (s.toLowerCase().match(/[\p{L}\p{N}]{3,}/gu) || []).filter(w => !STOP.has(w));
+const toks = s => new Set(s.toLowerCase().match(/[\p{L}\p{N}]{3,}/gu) || []);
+const sameish = (a, b) => {
+  const A = toks(a), B = toks(b);
+  if (!A.size || !B.size) return false;
+  let n = 0;
+  A.forEach(w => B.has(w) && n++);
+  return n / Math.min(A.size, B.size) > 0.8;
+};
+function summarize(text, name, title, maxChars = 330, maxSent = 2) {
+  const t = text.replace(/\s+/g, ' ').trim();
+  let sents = (t.match(/[^.!?。]+[.!?。]+(?=\s|$)|[^.!?。]+$/g) || [t]).map(s => s.trim());
+  sents = sents.filter(s => s.length >= 40 && s.length <= 420 && !(title && sameish(s, title)) &&
+    !/^(subscribe|sign up|read more|follow us|copyright|all rights|cookie|advertisement|share this)/i.test(s));
+  if (!sents.length) return '';
+  let pick;
+  if (sents.length <= maxSent) pick = sents;
+  else {
+    const tf = {};
+    sents.forEach(s => words(s).forEach(w => (tf[w] = (tf[w] || 0) + 1)));
+    const nm = (name || '').toLowerCase();
+    pick = sents
+      .map((s, i) => {
+        const w = words(s);
+        let sc = w.reduce((a, x) => a + tf[x], 0) / Math.sqrt(w.length || 1);
+        if (i === 0) sc *= 1.4; else if (i < 3) sc *= 1.15;
+        if (nm && s.toLowerCase().includes(nm)) sc *= 1.25;
+        return { s, i, sc };
+      })
+      .sort((a, b) => b.sc - a.sc).slice(0, maxSent)
+      .sort((a, b) => a.i - b.i).map(x => x.s);
+  }
+  return cut(pick.join(' '), maxChars);
+}
 
-// Đọc cả RSS lẫn Atom
+// ---------- đọc RSS / Atom ----------
 function parseFeed(xml, limit = 8) {
   return xml
     .split(/<(?:item|entry)[\s>]/)
@@ -84,18 +137,16 @@ function parseFeed(xml, limit = 8) {
       let link = tag(b, 'link');
       if (!link) {
         const m = b.match(/<link[^>]*href="([^"]+)"/);
-        link = m ? m[1] : '';
+        link = m ? m[1].replace(/&amp;/g, '&') : '';
       }
-      const title = tag(b, 'title');
-      const desc = tag(b, 'description') || tag(b, 'summary') || tag(b, 'content:encoded') || tag(b, 'content');
-      const text = desc && desc.slice(0, 40) !== title.slice(0, 40) ? `${title} — ${desc.slice(0, 220)}` : title;
       return {
         time: iso(tag(b, 'pubDate') || tag(b, 'published') || tag(b, 'updated') || tag(b, 'dc:date')),
-        text,
+        title: tag(b, 'title'),
+        body: (tag(b, 'content:encoded') || tag(b, 'description') || tag(b, 'summary') || tag(b, 'content')).slice(0, 4000),
         url: link,
       };
     })
-    .filter(i => i.text);
+    .filter(i => i.title);
 }
 
 // ---------- CoinGecko ----------
@@ -168,7 +219,7 @@ async function pressQuery(coin, range) {
     const srcName = tag(blk, 'source');
     if (srcName && title.endsWith(' - ' + srcName)) title = title.slice(0, -(srcName.length + 3));
     if (!title.toLowerCase().includes(coin.name.toLowerCase()) && !symRe.test(title)) continue; // lọc tin lạc đề
-    out.push(item(PRESS[site], G.PRESS, iso(tag(blk, 'pubDate')), title, tag(blk, 'link')));
+    out.push({ source: PRESS[site], group: G.PRESS, time: iso(tag(blk, 'pubDate')), title, url: tag(blk, 'link') });
     if (out.length >= 15) break;
   }
   return out;
@@ -186,7 +237,7 @@ async function fromPress(coin) {
 
 // ---------- X (x.com): embed timeline chính thức, dự phòng Nitter ----------
 async function fromX(handle) {
-  const label = `X @${handle}`;
+  const mk = (time, title, url) => ({ source: 'X', sub: '@' + handle, group: G.OFFICIAL, time, title, url });
   try {
     const html = await getText(`https://syndication.twitter.com/srv/timeline-profile/screen-name/${handle}`, { timeout: 4500 });
     const m = html.match(/<script id="__NEXT_DATA__" type="application\/json">([\s\S]*?)<\/script>/);
@@ -196,24 +247,14 @@ async function fromX(handle) {
         .map(e => e.content?.tweet || e.content)
         .filter(t => t && (t.full_text || t.text))
         .slice(0, 10)
-        .map(t =>
-          item(
-            label,
-            G.OFFICIAL,
-            iso(t.created_at),
-            clean(t.full_text || t.text),
-            t.permalink ? 'https://x.com' + t.permalink : `https://x.com/${handle}/status/${t.id_str}`
-          )
-        );
+        .map(t => mk(iso(t.created_at), t.full_text || t.text, t.permalink ? 'https://x.com' + t.permalink : `https://x.com/${handle}/status/${t.id_str}`));
       if (out.length) return out;
     }
   } catch {}
   for (const base of NITTER) {
     try {
       const xml = await getText(`${base}/${handle}/rss`, { timeout: 4000 });
-      const got = parseFeed(xml, 10).map(i =>
-        item(label, G.OFFICIAL, i.time, i.text, i.url.replace(/^https?:\/\/[^/]+/, 'https://x.com'))
-      );
+      const got = parseFeed(xml, 10).map(i => mk(i.time, i.title, i.url.replace(/^https?:\/\/[^/]+/, 'https://x.com')));
       if (got.length) return got;
     } catch {}
   }
@@ -224,22 +265,15 @@ async function fromX(handle) {
 async function fromReddit(url) {
   const m = url.match(/reddit\.com\/r\/([^/]+)/);
   if (!m) return [];
-  const sub = m[1];
-  const label = `Reddit r/${sub}`;
+  const mk = (time, title, body, link) => ({ source: 'Reddit', sub: 'r/' + m[1], group: G.COMMUNITY, time, title, body, url: link });
   try {
-    const d = await getJson(`https://www.reddit.com/r/${sub}/new.json?limit=10&raw_json=1`);
+    const d = await getJson(`https://www.reddit.com/r/${m[1]}/new.json?limit=10&raw_json=1`);
     return d.data.children.map(p =>
-      item(
-        label,
-        G.COMMUNITY,
-        new Date(p.data.created_utc * 1000).toISOString(),
-        p.data.title + (p.data.selftext ? ' — ' + p.data.selftext.slice(0, 250) : ''),
-        'https://www.reddit.com' + p.data.permalink
-      )
+      mk(new Date(p.data.created_utc * 1000).toISOString(), p.data.title, p.data.selftext, 'https://www.reddit.com' + p.data.permalink)
     );
   } catch {
-    const xml = await getText(`https://www.reddit.com/r/${sub}/new/.rss`);
-    return parseFeed(xml, 10).map(i => item(label, G.COMMUNITY, i.time, i.text, i.url));
+    const xml = await getText(`https://www.reddit.com/r/${m[1]}/new/.rss`);
+    return parseFeed(xml, 10).map(i => mk(i.time, i.title, i.body, i.url));
   }
 }
 
@@ -252,7 +286,8 @@ async function fromTelegram(id) {
     const time = blk.match(/<time[^>]*datetime="([^"]+)"/);
     const post = blk.match(/data-post="([^"]+)"/);
     if (!txt) continue;
-    out.push(item(`Telegram ${id}`, G.COMMUNITY, iso(time?.[1]), clean(txt[1]).slice(0, 400), post ? 'https://t.me/' + post[1] : `https://t.me/${id}`));
+    const text = prose(txt[1]);
+    out.push({ source: 'Telegram', sub: id, group: G.COMMUNITY, time: iso(time?.[1]), title: text, body: text, url: post ? 'https://t.me/' + post[1] : `https://t.me/${id}` });
     if (out.length >= 8) break;
   }
   return out;
@@ -273,11 +308,11 @@ async function fromGithub(url) {
   const out = [];
   if (a.status === 'fulfilled')
     a.value.forEach(r =>
-      out.push(item(`GitHub ${repo} (bản phát hành)`, G.OFFICIAL, iso(r.published_at), `${r.name || r.tag_name}${r.body ? ': ' + clean(r.body).slice(0, 220) : ''}`, r.html_url))
+      out.push({ source: 'GitHub (release)', sub: repo, group: G.OFFICIAL, time: iso(r.published_at), title: r.name || r.tag_name, body: r.body, url: r.html_url })
     );
   if (b.status === 'fulfilled')
     b.value.forEach(c =>
-      out.push(item(`GitHub ${repo} (commit)`, G.OFFICIAL, iso(c.commit?.author?.date), (c.commit?.message || '').split('\n')[0], c.html_url))
+      out.push({ source: 'GitHub (commit)', sub: repo, group: G.OFFICIAL, time: iso(c.commit?.author?.date), title: (c.commit?.message || '').split('\n')[0], url: c.html_url })
     );
   return out;
 }
@@ -297,7 +332,7 @@ async function fromSiteFeed(url) {
     feedUrl = new URL(href[1], url).href;
   }
   const xml = await getText(feedUrl, { timeout: 4500 });
-  return parseFeed(xml, 8).map(i => item(`Blog chính thức (${host})`, G.OFFICIAL, i.time, i.text, i.url));
+  return parseFeed(xml, 8).map(i => ({ source: 'Blog chính thức', sub: host, group: G.OFFICIAL, time: i.time, title: i.title, body: i.body, url: i.url }));
 }
 
 // ---------- CoinPaprika: sự kiện của dự án ----------
@@ -309,9 +344,7 @@ async function fromPaprika(coin) {
   return (ev || [])
     .sort((a, b) => new Date(b.date) - new Date(a.date))
     .slice(0, 8)
-    .map(e =>
-      item('CoinPaprika (sự kiện)', G.DATA, iso(e.date), [e.name, e.description].filter(Boolean).join(' — ').slice(0, 400), e.link || `https://coinpaprika.com/coin/${hit.id}/`)
-    );
+    .map(e => ({ source: 'CoinPaprika', sub: 'sự kiện', group: G.DATA, time: iso(e.date), title: e.name, body: e.description, url: e.link || `https://coinpaprika.com/coin/${hit.id}/` }));
 }
 
 // ---------- DexScreener: thanh khoản / khối lượng trên DEX ----------
@@ -323,16 +356,10 @@ async function fromDex(coin) {
     .filter(p => p.liquidity?.usd)
     .sort((a, b) => b.liquidity.usd - a.liquidity.usd)
     .slice(0, 3)
-    .map(p =>
-      item(
-        `DexScreener (${p.dexId} · ${p.chainId})`,
-        G.DATA,
-        now,
-        '',
-        p.url,
-        `Cặp ${p.baseToken?.symbol}/${p.quoteToken?.symbol}: giá $${usd(p.priceUsd)}, thanh khoản $${usd(p.liquidity.usd)}, khối lượng 24h $${usd(p.volume?.h24)}, biến động 24h ${pct(p.priceChange?.h24)}.`
-      )
-    );
+    .map(p => ({
+      source: 'DexScreener', sub: `${p.dexId} · ${p.chainId}`, group: G.DATA, time: now, url: p.url, isVi: true,
+      title: `Cặp ${p.baseToken?.symbol}/${p.quoteToken?.symbol}: giá $${usd(p.priceUsd)}, thanh khoản $${usd(p.liquidity.usd)}, khối lượng 24h $${usd(p.volume?.h24)}, biến động 24h ${pct(p.priceChange?.h24)}.`,
+    }));
 }
 
 // ---------- DefiLlama: TVL (chỉ có với token thuộc giao thức DeFi) ----------
@@ -340,16 +367,23 @@ async function fromLlama(coin) {
   const list = await getJson('https://api.llama.fi/protocols', { timeout: 6000 });
   const p = list.find(x => x.gecko_id === coin.id);
   if (!p) return [];
-  return [
-    item(
-      'DefiLlama',
-      G.DATA,
-      new Date().toISOString(),
-      '',
-      `https://defillama.com/protocol/${p.slug}`,
-      `Giao thức ${p.name} (${p.category}): TVL $${usd(p.tvl)}, thay đổi 1 ngày ${pct(p.change_1d)}, 7 ngày ${pct(p.change_7d)}; chuỗi: ${(p.chains || []).slice(0, 6).join(', ')}.`
-    ),
-  ];
+  return [{
+    source: 'DefiLlama', group: G.DATA, time: new Date().toISOString(), url: `https://defillama.com/protocol/${p.slug}`, isVi: true,
+    title: `Giao thức ${p.name} (${p.category}): TVL $${usd(p.tvl)}, thay đổi 1 ngày ${pct(p.change_1d)}, 7 ngày ${pct(p.change_7d)}; chuỗi: ${(p.chains || []).slice(0, 6).join(', ')}.`,
+  }];
+}
+
+// ---------- chuẩn hóa 1 mục: tiêu đề gọn + tóm tắt ----------
+function finalize(i, coin) {
+  const title = cut(prose(i.title), i.isVi ? 400 : 220);
+  let body = i.body ? mdText(i.body) : '';
+  const head = title.replace(/…$/, '').toLowerCase();
+  if (head.length > 20 && body.toLowerCase().startsWith(head.slice(0, 40))) {
+    body = body.slice(head.length).replace(/^[\s—–:\-.]+/, '');
+  }
+  const summary = body.length >= 80 ? summarize(body, coin.name, title, 330, 2) : '';
+  const canFetch = !summary && !!i.url && (i.group === G.PRESS || /^(Blog|Reddit)/.test(i.source));
+  return { source: i.source, sub: i.sub || '', group: i.group, time: i.time, url: i.url, title, summary, isVi: !!i.isVi, canFetch };
 }
 
 // ---------- handler ----------
@@ -382,7 +416,7 @@ exports.handler = async event => {
 
   const tasks = [];
   if (coin.description)
-    tasks.push([item('CoinGecko (giới thiệu)', G.DATA, coin.updated, coin.description.slice(0, 700), 'https://www.coingecko.com/en/coins/' + coin.id)]);
+    tasks.push([{ source: 'CoinGecko', sub: 'giới thiệu', group: G.DATA, time: coin.updated, title: 'Giới thiệu dự án', isVi: true, body: coin.description.slice(0, 1500), url: 'https://www.coingecko.com/en/coins/' + coin.id }]);
 
   tasks.push(run('Báo chí', () => fromPress(coin)));
   tasks.push(run('CoinPaprika', () => fromPaprika(coin), false));
@@ -398,24 +432,16 @@ exports.handler = async event => {
 
   const seen = new Set();
   const items = all
-    .filter(i => i && (i.text || i.vi))
+    .filter(i => i && i.title)
+    .map(i => finalize(i, coin))
     .filter(i => {
-      const k = (i.url || '') + '|' + (i.text || i.vi).slice(0, 60);
+      const k = (i.url || '') + '|' + i.title.slice(0, 60);
       if (seen.has(k)) return false;
       seen.add(k);
       return true;
     })
     .sort((a, b) => new Date(b.time || 0) - new Date(a.time || 0))
-    .slice(0, 150)
-    .map(i => ({
-      source: i.source,
-      group: i.group,
-      time: i.time,
-      url: i.url,
-      original: i.text || i.vi,
-      vi: i.vi || i.text,
-      needsTranslation: !i.vi, // phần này sẽ được dịch qua /.netlify/functions/translate
-    }));
+    .slice(0, 150);
 
   delete coin.description;
   return json(200, { coin, items, warnings });
