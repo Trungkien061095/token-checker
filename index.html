@@ -1,0 +1,194 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Token Checker</title>
+<style>
+  :root { --bg:#0f1115; --card:#181b22; --line:#2a2f3a; --text:#e8eaf0; --mute:#8b93a7; --acc:#4f8cff; --up:#2ecc71; --down:#ff5c5c; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font:15px/1.5 system-ui,-apple-system,Segoe UI,Roboto,sans-serif; }
+  .wrap { max-width:1100px; margin:0 auto; padding:24px 16px 60px; }
+  h1 { font-size:22px; margin:0 0 16px; }
+  .search { display:flex; gap:8px; flex-wrap:wrap; }
+  input, select, button { background:var(--card); color:var(--text); border:1px solid var(--line); border-radius:8px; padding:10px 12px; font:inherit; }
+  input { flex:1; min-width:180px; }
+  button { background:var(--acc); border-color:var(--acc); cursor:pointer; font-weight:600; }
+  button:disabled { opacity:.6; cursor:wait; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:16px; margin-top:16px; }
+  .head { display:flex; gap:12px; align-items:center; flex-wrap:wrap; }
+  .head img { width:40px; height:40px; border-radius:50%; }
+  .stats { display:flex; gap:20px; flex-wrap:wrap; margin-top:10px; color:var(--mute); font-size:14px; }
+  .stats b { color:var(--text); }
+  .up { color:var(--up); } .down { color:var(--down); }
+  .links { margin-top:10px; display:flex; gap:8px; flex-wrap:wrap; }
+  .links a { font-size:13px; padding:4px 10px; border:1px solid var(--line); border-radius:999px; color:var(--acc); text-decoration:none; }
+  .filters { display:flex; gap:8px; flex-wrap:wrap; margin-top:16px; align-items:center; }
+  .filters span { color:var(--mute); font-size:14px; }
+  table { width:100%; border-collapse:collapse; margin-top:10px; }
+  th, td { text-align:left; padding:10px 8px; border-bottom:1px solid var(--line); vertical-align:top; }
+  th { color:var(--mute); font-weight:500; font-size:13px; }
+  td.src { font-weight:600; max-width:200px; word-break:break-word; }
+  td.time { white-space:nowrap; color:var(--mute); font-size:13px; }
+  .orig { color:var(--mute); font-size:12px; margin-top:4px; font-weight:400; }
+  a { color:var(--acc); }
+  .msg { color:var(--mute); padding:20px 0; }
+  .warn { color:#f0b84b; font-size:13px; margin-top:8px; }
+  @media (max-width:640px){ th:nth-child(2), td.time { display:none; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>🔎 Token Checker</h1>
+  <form class="search" id="form">
+    <input id="q" placeholder="Nhập mã token, ví dụ: WLD, BTC, SOL..." autocomplete="off" autofocus>
+    <button id="btn" type="submit">Tìm</button>
+  </form>
+
+  <div id="info"></div>
+
+  <div class="filters" id="filters" style="display:none">
+    <span>Lọc:</span>
+    <select id="fGroup"><option value="">Mọi loại nguồn</option></select>
+    <select id="fSource"><option value="">Tất cả nguồn</option></select>
+    <select id="fTime">
+      <option value="0">Mọi thời gian</option>
+      <option value="1">24 giờ qua</option>
+      <option value="7">7 ngày qua</option>
+      <option value="30">30 ngày qua</option>
+    </select>
+    <select id="fSort">
+      <option value="new">Mới nhất trước</option>
+      <option value="old">Cũ nhất trước</option>
+    </select>
+    <span id="count"></span>
+    <span id="prog"></span>
+  </div>
+
+  <div id="result"></div>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+let items = [];
+let gen = 0; // đánh dấu lần tìm hiện tại, tránh kết quả dịch của lần tìm cũ chen vào
+
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const fmtUsd = n => n == null ? '—' : (n >= 1 ? n.toLocaleString('en-US',{maximumFractionDigits:2}) : n.toPrecision(3));
+const fmtBig = n => n == null ? '—' : n >= 1e9 ? (n/1e9).toFixed(2)+' tỷ' : n >= 1e6 ? (n/1e6).toFixed(2)+' triệu' : n.toLocaleString('en-US');
+const fmtTime = iso => iso ? new Date(iso).toLocaleString('vi-VN', {hour12:false}) : '—';
+
+$('form').addEventListener('submit', async e => {
+  e.preventDefault();
+  const q = $('q').value.trim();
+  if (!q) return;
+  const myGen = ++gen;
+  $('btn').disabled = true;
+  $('info').innerHTML = '';
+  $('filters').style.display = 'none';
+  $('prog').textContent = '';
+  $('result').innerHTML = '<div class="msg">Đang thu thập thông tin từ các nguồn... (có thể mất 5–10 giây)</div>';
+  try {
+    const r = await fetch('/.netlify/functions/token?q=' + encodeURIComponent(q));
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.error || 'Lỗi không xác định');
+    if (myGen !== gen) return;
+    render(data);
+    translateAll(myGen); // hiện kết quả ngay, dịch dần phía sau
+  } catch (err) {
+    $('result').innerHTML = '<div class="msg">Lỗi: ' + esc(err.message) + '</div>';
+  } finally {
+    $('btn').disabled = false;
+  }
+});
+
+function render(d) {
+  const c = d.coin;
+  const ch = c.change24h;
+  $('info').innerHTML = `
+    <div class="card">
+      <div class="head">
+        ${c.image ? `<img src="${esc(c.image)}" alt="">` : ''}
+        <div><b style="font-size:18px">${esc(c.name)}</b> <span style="color:var(--mute)">${esc(c.symbol)}</span></div>
+      </div>
+      <div class="stats">
+        <div>Giá: <b>$${fmtUsd(c.price)}</b></div>
+        <div>24h: <b class="${ch >= 0 ? 'up' : 'down'}">${ch == null ? '—' : ch.toFixed(2) + '%'}</b></div>
+        <div>Vốn hóa: <b>$${fmtBig(c.marketCap)}</b></div>
+        <div>Hạng: <b>${c.rank ?? '—'}</b></div>
+        <div>Khối lượng 24h: <b>$${fmtBig(c.volume24h)}</b></div>
+        <div>FDV: <b>$${fmtBig(c.fdv)}</b></div>
+        <div>Đang lưu hành: <b>${fmtBig(c.circulating)}</b></div>
+      </div>
+      <div class="links">${c.links.map(l => `<a href="${esc(l.url)}" target="_blank" rel="noopener">${esc(l.label)}</a>`).join('')}</div>
+      ${d.warnings.length ? `<div class="warn">⚠ ${d.warnings.map(esc).join(' · ')}</div>` : ''}
+    </div>`;
+
+  items = d.items.map(i => ({ ...i, translated: false, pending: !!i.needsTranslation }));
+  const opts = (arr, all) => `<option value="">${all}</option>` + arr.map(s => `<option>${esc(s)}</option>`).join('');
+  $('fGroup').innerHTML = opts([...new Set(items.map(i => i.group))], 'Mọi loại nguồn');
+  $('fSource').innerHTML = opts([...new Set(items.map(i => i.source))], 'Tất cả nguồn');
+  $('filters').style.display = 'flex';
+  draw();
+}
+
+async function translateAll(myGen) {
+  const todo = items.filter(i => i.pending);
+  if (!todo.length) return;
+  const size = 8, total = todo.length;
+  let done = 0;
+  const chunks = [];
+  for (let k = 0; k < todo.length; k += size) chunks.push(todo.slice(k, k + size));
+  $('prog').textContent = `Đang dịch 0/${total}...`;
+  await Promise.all(chunks.map(async ch => {
+    try {
+      const r = await fetch('/.netlify/functions/translate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ texts: ch.map(i => i.original) })
+      });
+      const d = await r.json();
+      ch.forEach((i, k) => {
+        const t = d.results && d.results[k];
+        if (t) { i.vi = t.vi; i.translated = t.translated; }
+        i.pending = false;
+      });
+    } catch {
+      ch.forEach(i => i.pending = false);
+    }
+    if (myGen !== gen) return;
+    done += ch.length;
+    $('prog').textContent = done < total ? `Đang dịch ${done}/${total}...` : 'Đã dịch xong';
+    draw();
+  }));
+}
+
+function draw() {
+  const grp = $('fGroup').value;
+  const src = $('fSource').value;
+  const days = +$('fTime').value;
+  const sort = $('fSort').value;
+  const now = Date.now();
+  let list = items.filter(i =>
+    (!grp || i.group === grp) &&
+    (!src || i.source === src) &&
+    (!days || (i.time && now - new Date(i.time) <= days * 864e5)));
+  list.sort((a, b) => (new Date(b.time || 0) - new Date(a.time || 0)) * (sort === 'new' ? 1 : -1));
+  $('count').textContent = list.length + ' mục';
+  if (!list.length) { $('result').innerHTML = '<div class="msg">Không có thông tin phù hợp.</div>'; return; }
+  $('result').innerHTML = `<table>
+    <thead><tr><th>Nguồn</th><th>Thời gian</th><th>Nội dung (tiếng Việt)</th></tr></thead>
+    <tbody>${list.map(i => `<tr>
+      <td class="src">${esc(i.source)}<div class="orig">${esc(i.group)}</div></td>
+      <td class="time">${fmtTime(i.time)}</td>
+      <td>${esc(i.vi)}
+        ${i.pending ? `<div class="orig">⏳ Đang dịch...</div>` : ''}
+        ${i.translated ? `<div class="orig">Gốc: ${esc(i.original)}</div>` : ''}
+        ${i.url ? `<div class="orig"><a href="${esc(i.url)}" target="_blank" rel="noopener">Xem nguồn ↗</a></div>` : ''}
+      </td></tr>`).join('')}</tbody></table>`;
+}
+
+['fGroup', 'fSource', 'fTime', 'fSort'].forEach(id => $(id).addEventListener('change', draw));
+</script>
+</body>
+</html>
